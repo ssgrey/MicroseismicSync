@@ -160,7 +160,7 @@
                                           ItemsSource="{Binding SgyPanel.Files}">
                                     <DataGrid.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="手动同步选中项"
+                                            <MenuItem Header="同步选中项"
                                                       Click="ManualSyncSelectedMenuItem_OnClick"
                                                       Tag="SGY" />
                                         </ContextMenu>
@@ -231,7 +231,7 @@
                                           ItemsSource="{Binding EsfPanel.Files}">
                                     <DataGrid.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="手动同步选中项"
+                                            <MenuItem Header="同步选中项"
                                                       Click="ManualSyncSelectedMenuItem_OnClick"
                                                       Tag="ESF" />
                                         </ContextMenu>
@@ -302,7 +302,7 @@
                                           ItemsSource="{Binding CsvPanel.Files}">
                                     <DataGrid.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="手动同步选中项"
+                                            <MenuItem Header="同步选中项"
                                                       Click="ManualSyncSelectedMenuItem_OnClick"
                                                       Tag="CSV" />
                                         </ContextMenu>
