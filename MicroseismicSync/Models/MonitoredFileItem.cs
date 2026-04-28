@@ -10,6 +10,7 @@ namespace MicroseismicSync.Models
         private DateTime creationTime;
         private DateTime lastWriteTime;
         private long fileSizeBytes;
+        private bool isAutoSyncCandidate;
         private string syncStatus;
 
         public string FileName
@@ -75,6 +76,13 @@ namespace MicroseismicSync.Models
         {
             get { return syncStatus; }
             set { SetProperty(ref syncStatus, value); }
+        }
+
+        // 后台字段：标记该文件是否是在开启同步后新增的，可进入自动同步队列。
+        public bool IsAutoSyncCandidate
+        {
+            get { return isAutoSyncCandidate; }
+            set { SetProperty(ref isAutoSyncCandidate, value); }
         }
     }
 }

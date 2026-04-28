@@ -23,6 +23,7 @@ namespace MicroseismicSync.ViewModels
         private FileSystemWatcher watcher;
         private string folderPath;
         private string folderPathInput;
+        private bool isAutoSyncTrackingActive;
         private bool suppressFolderPathInputAutoApply;
 
         public FileMonitorPanelViewModel(string title, string searchPattern, IAppLogger logger)
@@ -80,6 +81,26 @@ namespace MicroseismicSync.ViewModels
 
         public RelayCommand SelectFolderCommand { get; private set; }
 
+        public void BeginAutoSyncTracking()
+        {
+            isAutoSyncTrackingActive = true;
+
+            foreach (var file in Files)
+            {
+                file.IsAutoSyncCandidate = false;
+
+                if (!string.Equals(file.SyncStatus, "已同步", StringComparison.Ordinal))
+                {
+                    file.SyncStatus = "已有文件";
+                }
+            }
+        }
+
+        public void EndAutoSyncTracking()
+        {
+            isAutoSyncTrackingActive = false;
+        }
+
         public void Dispose()
         {
             StopWatcher();
@@ -126,6 +147,8 @@ namespace MicroseismicSync.ViewModels
 
             if (string.IsNullOrWhiteSpace(normalizedPath) || !Directory.Exists(normalizedPath))
             {
+                FolderPath = normalizedPath;
+                ReloadFiles();
                 logger.Info(string.Format("{0} monitor path rejected: {1}", Title, path ?? string.Empty));
                 return;
             }
@@ -204,7 +227,7 @@ namespace MicroseismicSync.ViewModels
                 {
                     fileItems = Directory
                         .EnumerateFiles(currentPath, searchPattern, SearchOption.TopDirectoryOnly)
-                        .Select(path => CreateItem(path, "待同步"))
+                        .Select(path => CreateItem(path, "已有文件", false))
                         .OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
                         .ToList();
 
@@ -254,7 +277,7 @@ namespace MicroseismicSync.ViewModels
 
         private void OnChanged(object sender, FileSystemEventArgs e)
         {
-            UpsertFile(e.FullPath, "已变更");
+            //UpsertFile(e.FullPath, "已变更");
         }
 
         private void OnDeleted(object sender, FileSystemEventArgs e)
@@ -387,15 +410,22 @@ namespace MicroseismicSync.ViewModels
 
                     if (existing == null)
                     {
-                        Files.Add(CreateItem(path, status));
-                        SortFiles();
+                        Files.Add(CreateItem(path, ResolveStatusForNewFile(), isAutoSyncTrackingActive));
                     }
                     else
                     {
                         existing.CreationTime = SafeGetCreationTime(path);
                         existing.LastWriteTime = SafeGetLastWriteTime(path);
                         existing.FileSizeBytes = SafeGetFileSize(path);
-                        existing.SyncStatus = status;
+
+                        if (existing.IsAutoSyncCandidate)
+                        {
+                            existing.SyncStatus = status;
+                        }
+                        else if (!string.Equals(existing.SyncStatus, "已同步", StringComparison.Ordinal))
+                        {
+                            existing.SyncStatus = "已有文件";
+                        }
                     }
 
                     fileSnapshots[path] = snapshot;
@@ -414,7 +444,7 @@ namespace MicroseismicSync.ViewModels
             logger.Info(string.Format("{0} detected: {1}", Title, Path.GetFileName(path)));
         }
 
-        private MonitoredFileItem CreateItem(string path, string status)
+        private MonitoredFileItem CreateItem(string path, string status, bool isAutoSyncCandidate)
         {
             return new MonitoredFileItem
             {
@@ -423,25 +453,9 @@ namespace MicroseismicSync.ViewModels
                 CreationTime = SafeGetCreationTime(path),
                 LastWriteTime = SafeGetLastWriteTime(path),
                 FileSizeBytes = SafeGetFileSize(path),
+                IsAutoSyncCandidate = isAutoSyncCandidate,
                 SyncStatus = status,
             };
-        }
-
-        private void SortFiles()
-        {
-            var ordered = Files
-                .OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            for (var index = 0; index < ordered.Count; index++)
-            {
-                var item = ordered[index];
-                var currentIndex = Files.IndexOf(item);
-                if (currentIndex >= 0 && currentIndex != index)
-                {
-                    Files.Move(currentIndex, index);
-                }
-            }
         }
 
         private static string NormalizeFolderPath(string path)
@@ -449,6 +463,11 @@ namespace MicroseismicSync.ViewModels
             return string.IsNullOrWhiteSpace(path)
                 ? string.Empty
                 : path.Trim().Trim('"');
+        }
+
+        private string ResolveStatusForNewFile()
+        {
+            return isAutoSyncTrackingActive ? "待同步" : "已有文件";
         }
 
         private void ScheduleFolderPathApply()

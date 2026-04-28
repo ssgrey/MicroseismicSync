@@ -41,15 +41,15 @@ namespace MicroseismicSync.ViewModels
         private string logText;
         private bool isBusy;
         private bool isLogPanelVisible;
+        // 本地文件自动同步开关。
         private bool isAutoSyncEnabled;
+        // 同一时刻只允许一个同步请求在跑，避免并发上传打乱顺序。
         private bool isSyncInProgress;
+        // 同步执行期间如果又检测到新文件，用这个标记在当前任务结束后继续补跑下一轮。
         private bool hasPendingSyncRequest;
         private bool isBackendMonitoring;
         private bool isBackendRefreshInProgress;
         private bool hasPendingBackendRefresh;
-        private int sgyFileCount;
-        private int esfFileCount;
-        private int csvFileCount;
         private int activeTabIndex;
         private int backendMonitorIntervalSeconds;
         private WellInfo selectedWell;
@@ -89,6 +89,7 @@ namespace MicroseismicSync.ViewModels
             ToggleLogPanelCommand = new RelayCommand(ToggleLogPanel);
             ClearLogCommand = new RelayCommand(ClearLogPanel);
 
+            // 文件新增/变更时先做一次短暂防抖，避免同一批文件触发过多同步请求。
             syncDebounceTimer = new DispatcherTimer
             {
                 Interval = TimeSpan.FromMilliseconds(800),
@@ -453,7 +454,10 @@ namespace MicroseismicSync.ViewModels
                 return;
             }
 
-            CaptureCurrentFileCounts();
+            // 以当前目录中的文件作为基线，自动同步只处理启动后新出现的文件。
+            SgyPanel.BeginAutoSyncTracking();
+            EsfPanel.BeginAutoSyncTracking();
+            CsvPanel.BeginAutoSyncTracking();
             hasPendingSyncRequest = false;
             isAutoSyncEnabled = true;
             syncDebounceTimer.Stop();
@@ -473,6 +477,9 @@ namespace MicroseismicSync.ViewModels
             isAutoSyncEnabled = false;
             hasPendingSyncRequest = false;
             syncDebounceTimer.Stop();
+            SgyPanel.EndAutoSyncTracking();
+            EsfPanel.EndAutoSyncTracking();
+            CsvPanel.EndAutoSyncTracking();
             StatusMessage = "同步监控已停止。";
             logger.Info(StatusMessage);
             OnPropertyChanged("CanChangeSelectedWell");
@@ -531,7 +538,7 @@ namespace MicroseismicSync.ViewModels
         {
             syncDebounceTimer.Stop();
 
-            if (!isAutoSyncEnabled || isSyncInProgress || !HasFileCountChanged())
+            if (!isAutoSyncEnabled || isSyncInProgress || !HasAutoSyncFilesToProcess())
             {
                 return;
             }
@@ -546,20 +553,19 @@ namespace MicroseismicSync.ViewModels
 
         private async Task SyncPendingFilesAsync()
         {
-            var files = GetFilesToSync().ToList();
-            var currentSgyCount = SgyPanel.Files.Count;
-            var currentEsfCount = EsfPanel.Files.Count;
-            var currentCsvCount = CsvPanel.Files.Count;
-
-            if (files.Count == 0)
+            // 自动同步严格按队列顺序一次只处理一个文件。
+            var nextFile = GetNextAutoSyncFile();
+            if (nextFile == null)
             {
-                UpdateRecordedFileCounts(currentSgyCount, currentEsfCount, currentCsvCount);
-                StatusMessage = "文件数量已变化，当前没有待同步文件。";
+                StatusMessage = "当前没有待同步文件。";
                 logger.Info(StatusMessage);
                 return;
             }
 
-            await SyncFilesAsync(files, true, "同步完成，成功 {0}，失败 {1}。");
+            await SyncFilesAsync(
+                new[] { nextFile },
+                true,
+                "同步完成，成功 {0}，失败 {1}。");
         }
 
         public async Task SyncSelectedFilesAsync(string fileType, IEnumerable<MonitoredFileItem> selectedFiles)
@@ -571,6 +577,7 @@ namespace MicroseismicSync.ViewModels
                 return;
             }
 
+            // 手动同步按当前选择批量执行，但仍然复用统一的上传和状态更新逻辑。
             var files = selectedFiles
                 .Where(file => file != null)
                 .GroupBy(file => file.FullPath ?? string.Empty, StringComparer.OrdinalIgnoreCase)
@@ -588,7 +595,7 @@ namespace MicroseismicSync.ViewModels
             await SyncFilesAsync(files, false, "手动同步完成，成功 {0}，失败 {1}。");
         }
 
-        private async Task SyncFilesAsync(IList<SyncFileItem> files, bool updateRecordedFileCounts, string resultMessageFormat)
+        private async Task SyncFilesAsync(IList<SyncFileItem> files, bool continueAutoSyncAfterCompletion, string resultMessageFormat)
         {
             if (SelectedWell == null)
             {
@@ -620,6 +627,7 @@ namespace MicroseismicSync.ViewModels
 
             try
             {
+                // 同步顺序由调用方决定；这里按传入顺序串行调用接口。
                 foreach (var syncItem in files)
                 {
                     syncItem.File.SyncStatus = "同步中";
@@ -662,11 +670,6 @@ namespace MicroseismicSync.ViewModels
                     }
                 }
 
-                if (updateRecordedFileCounts)
-                {
-                    UpdateRecordedFileCounts(SgyPanel.Files.Count, EsfPanel.Files.Count, CsvPanel.Files.Count);
-                }
-
                 StatusMessage = string.Format(resultMessageFormat, successCount, failedCount);
                 logger.Info(StatusMessage);
             }
@@ -675,7 +678,8 @@ namespace MicroseismicSync.ViewModels
                 isSyncInProgress = false;
                 SetBusy(false, string.Empty);
 
-                if (hasPendingSyncRequest)
+                // 自动模式下，如果同步期间又进了新文件，或者队列里还有待处理文件，继续下一轮。
+                if (continueAutoSyncAfterCompletion && (hasPendingSyncRequest || HasAutoSyncFilesToProcess()))
                 {
                     hasPendingSyncRequest = false;
                     RequestAutoSync();
@@ -839,15 +843,39 @@ namespace MicroseismicSync.ViewModels
             return IsBackendTabActive;
         }
 
-        private IEnumerable<SyncFileItem> GetFilesToSync()
+        private SyncFileItem GetNextAutoSyncFile()
         {
-            return EnumeratePendingFiles(SgyPanel)
-                .Concat(EnumeratePendingFiles(EsfPanel))
-                .Concat(EnumeratePendingFiles(CsvPanel));
+            return EnumerateAutoSyncFiles(SgyPanel)
+                .Concat(EnumerateAutoSyncFiles(EsfPanel))
+                .Concat(EnumerateAutoSyncFiles(CsvPanel))
+                // 自动同步按文件产生顺序排队：越早创建的文件越先上传。
+                .OrderBy(item => item.File.CreationTime)
+                .ThenBy(item => item.File.LastWriteTime)
+                .ThenBy(item => item.File.FileName, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+
+        private bool HasAutoSyncFilesToProcess()
+        {
+            return EnumerateAutoSyncFiles(SgyPanel)
+                .Concat(EnumerateAutoSyncFiles(EsfPanel))
+                .Concat(EnumerateAutoSyncFiles(CsvPanel))
+                .Any();
+        }
+
+        private static IEnumerable<SyncFileItem> EnumerateAutoSyncFiles(FileMonitorPanelViewModel panel)
+        {
+            // 自动同步只处理真正还在队列里的文件，已经同步成功的文件不再重复进入队列。
+            return panel.Files
+                .Where(file => file.IsAutoSyncCandidate &&
+                    (string.Equals(file.SyncStatus, "待同步", StringComparison.Ordinal) ||
+                     string.Equals(file.SyncStatus, "已变更", StringComparison.Ordinal)))
+                .Select(file => new SyncFileItem(panel.Title, file));
         }
 
         private static IEnumerable<SyncFileItem> EnumeratePendingFiles(FileMonitorPanelViewModel panel)
         {
+            // 手动同步允许重新触发失败项或未完成项，因此只排除已同步文件。
             return panel.Files
                 .Where(file => !string.Equals(file.SyncStatus, "已同步", StringComparison.Ordinal))
                 .Select(file => new SyncFileItem(panel.Title, file));
@@ -891,6 +919,7 @@ namespace MicroseismicSync.ViewModels
                 e.Action == NotifyCollectionChangedAction.Remove ||
                 e.Action == NotifyCollectionChangedAction.Reset)
             {
+                // 文件列表发生入队/出队变化后，请求一次自动同步调度。
                 RequestAutoSync();
             }
         }
@@ -908,27 +937,9 @@ namespace MicroseismicSync.ViewModels
                 return;
             }
 
+            // 重新启动防抖定时器，合并短时间内的连续文件事件。
             syncDebounceTimer.Stop();
             syncDebounceTimer.Start();
-        }
-
-        private void CaptureCurrentFileCounts()
-        {
-            UpdateRecordedFileCounts(SgyPanel.Files.Count, EsfPanel.Files.Count, CsvPanel.Files.Count);
-        }
-
-        private void UpdateRecordedFileCounts(int newSgyCount, int newEsfCount, int newCsvCount)
-        {
-            sgyFileCount = newSgyCount;
-            esfFileCount = newEsfCount;
-            csvFileCount = newCsvCount;
-        }
-
-        private bool HasFileCountChanged()
-        {
-            return sgyFileCount != SgyPanel.Files.Count ||
-                   esfFileCount != EsfPanel.Files.Count ||
-                   csvFileCount != CsvPanel.Files.Count;
         }
 
         private void UpdateBackendMonitorTimerInterval()
